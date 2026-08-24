@@ -4,7 +4,7 @@ export const cloudProviders = [
     name: "Microsoft Azure",
     shortName: "Azure",
     description: "Azure Machine Learning",
-    workloads: ["Sentiment Analysis", "Named Entity Recognition", "Image Classification"],
+    workloads: ["Sentiment Analysis", "Named Entity Recognition"],
     icon: "☁️",
   },
 
@@ -13,7 +13,7 @@ export const cloudProviders = [
     name: "Amazon Web Services",
     shortName: "AWS",
     description: "Amazon SageMaker",
-    workloads: ["Sentiment Analysis", "Named Entity Recognition", "Image Classification"],
+    workloads: ["Sentiment Analysis", "Named Entity Recognition"],
     icon: "🟠",
   },
 ];

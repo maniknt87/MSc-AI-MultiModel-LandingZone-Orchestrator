@@ -18,9 +18,6 @@ from config.governance_policies import GOVERNANCE_POLICIES
 AI_WORKLOADS = [
     "sentiment-analysis",
     "named-entity-recognition",
-    "image-classification",
-    "text-generation",
-    "embeddings",
 ]
 
 AI_COMPUTE_SIZES = {

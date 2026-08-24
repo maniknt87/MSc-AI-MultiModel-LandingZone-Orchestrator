@@ -117,8 +117,8 @@ function GovernanceCenter() {
           label="AI workloads"
           value={aiWorkloads.length}
           accent="#7c3aed"
-          details={["Sentiment", "NER", "Vision", "Generative AI", "Embeddings"].map((workload) => (
-            <Chip key={workload} label={workload} size="small" variant="outlined" sx={{ height: 22, color: "#6941c6", bgcolor: "#f9f5ff", borderColor: "#d6bbfb", fontWeight: 600 }} />
+          details={aiWorkloads.map((workload) => (
+            <Chip key={workload.id} label={workload.name} size="small" variant="outlined" sx={{ height: 22, color: "#6941c6", bgcolor: "#f9f5ff", borderColor: "#d6bbfb", fontWeight: 600 }} />
           ))}
         />
         <MetricCard

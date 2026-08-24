@@ -7,7 +7,6 @@ function formatWorkload(workload) {
   const names = {
     "sentiment-analysis": "Sentiment Analysis",
     "named-entity-recognition": "Named Entity Recognition",
-    "image-classification": "Image Classification",
   };
 
   return names[workload] || workload || "Not selected";

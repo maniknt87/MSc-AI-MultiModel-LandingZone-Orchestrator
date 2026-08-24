@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from services.auth_service import verify_access_token
 from services.inference_service import (
     get_recent_inference_runs,
-    invoke_sentiment_endpoint,
+    invoke_model_endpoint,
     list_playground_deployments,
 )
 
@@ -49,6 +49,6 @@ def invoke_model(request: InferenceRequest, current_user: dict = Depends(get_cur
     if not deployment["configured"]:
         raise HTTPException(status_code=503, detail=f"{deployment['cloud']} inference is not configured.")
     try:
-        return invoke_sentiment_endpoint(deployment, request.text.strip(), current_user["username"])
+        return invoke_model_endpoint(deployment, request.text.strip(), current_user["username"])
     except RuntimeError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error

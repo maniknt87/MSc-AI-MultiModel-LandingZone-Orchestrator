@@ -169,21 +169,23 @@ stages:
                 esac
                 STATE_BUCKET="${AWS_TF_STATE_BUCKET:-}"
                 LOCK_TABLE="${AWS_TF_LOCK_TABLE:-}"
-                if [ '${{ parameters.action }}' = 'destroy' ] && [ '${{ parameters.workload }}' = 'sentiment-analysis' ]; then
+                if [ '${{ parameters.action }}' = 'destroy' ]; then
                   BASE_NAME=$(printf '%s-%s' '${{ parameters.deploymentName }}' '${{ parameters.environment }}' | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')
-                  ENDPOINT_NAME="sentiment-${BASE_NAME}"
-                  ENDPOINT_CONFIG_NAME="sentiment-config-${BASE_NAME}"
-                  MODEL_NAME="sentiment-model-${BASE_NAME}"
-                  if aws sagemaker describe-endpoint --endpoint-name "$ENDPOINT_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
-                    aws sagemaker delete-endpoint --endpoint-name "$ENDPOINT_NAME" --region "$AWS_REGION"
-                    aws sagemaker wait endpoint-deleted --endpoint-name "$ENDPOINT_NAME" --region "$AWS_REGION"
-                  fi
-                  if aws sagemaker describe-endpoint-config --endpoint-config-name "$ENDPOINT_CONFIG_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
-                    aws sagemaker delete-endpoint-config --endpoint-config-name "$ENDPOINT_CONFIG_NAME" --region "$AWS_REGION"
-                  fi
-                  if aws sagemaker describe-model --model-name "$MODEL_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
-                    aws sagemaker delete-model --model-name "$MODEL_NAME" --region "$AWS_REGION"
-                  fi
+                  for MODEL_PREFIX in sentiment ner; do
+                    ENDPOINT_NAME="${MODEL_PREFIX}-${BASE_NAME}"
+                    ENDPOINT_CONFIG_NAME="${MODEL_PREFIX}-config-${BASE_NAME}"
+                    MODEL_NAME="${MODEL_PREFIX}-model-${BASE_NAME}"
+                    if aws sagemaker describe-endpoint --endpoint-name "$ENDPOINT_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+                      aws sagemaker delete-endpoint --endpoint-name "$ENDPOINT_NAME" --region "$AWS_REGION"
+                      aws sagemaker wait endpoint-deleted --endpoint-name "$ENDPOINT_NAME" --region "$AWS_REGION"
+                    fi
+                    if aws sagemaker describe-endpoint-config --endpoint-config-name "$ENDPOINT_CONFIG_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+                      aws sagemaker delete-endpoint-config --endpoint-config-name "$ENDPOINT_CONFIG_NAME" --region "$AWS_REGION"
+                    fi
+                    if aws sagemaker describe-model --model-name "$MODEL_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+                      aws sagemaker delete-model --model-name "$MODEL_NAME" --region "$AWS_REGION"
+                    fi
+                  done
                 fi
                 STATE_KEY="aws-${{ lower(parameters.deploymentName) }}-${{ lower(parameters.environment) }}.tfstate"
                 terraform -chdir="$(terraformDirectory)" init -reconfigure -input=false \
@@ -198,14 +200,14 @@ stages:
 - stage: ModelDeployment
   displayName: 'AWS AI Model Deployment'
   dependsOn: Apply
-  condition: and(succeeded(), eq('${{ parameters.action }}', 'apply'), eq('${{ parameters.workload }}', 'sentiment-analysis'))
+  condition: and(succeeded(), eq('${{ parameters.action }}', 'apply'), or(eq('${{ parameters.workload }}', 'sentiment-analysis'), eq('${{ parameters.workload }}', 'named-entity-recognition')))
   jobs:
-  - job: DeploySentiment
+  - job: DeployAIModel
     timeoutInMinutes: 45
     steps:
     - checkout: self
     - task: AWSShellScript@1
-      displayName: 'Deploy sentiment model to SageMaker'
+      displayName: 'Deploy validated model to SageMaker'
       inputs:
         awsCredentials: '$(awsServiceConnection)'
         regionName: 'ap-south-1'
@@ -222,17 +224,29 @@ stages:
           EXECUTION_ROLE_ARN=$(aws iam get-role --role-name "$ROLE_NAME" --query 'Role.Arn' --output text)
           AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           MODEL_BUCKET="ai-model-artifacts-${AWS_ACCOUNT_ID}-${AWS_REGION}"
-          MODEL_KEY="models/sentiment/v3/model.tar.gz"
+          case '${{ parameters.workload }}' in
+            'sentiment-analysis')
+              MODEL_KEY="models/sentiment/v3/model.tar.gz"
+              PACKAGE_SCRIPT="backend/ml/package_aws_model.py"
+              DEPLOY_SCRIPT="backend/ml/deploy_aws_sentiment.py"
+              ;;
+            'named-entity-recognition')
+              MODEL_KEY="models/ner/v1/model.tar.gz"
+              PACKAGE_SCRIPT="backend/ml/package_aws_ner_model.py"
+              DEPLOY_SCRIPT="backend/ml/deploy_aws_ner.py"
+              ;;
+            *) echo 'No SageMaker implementation exists for this workload.'; exit 1 ;;
+          esac
           MODEL_DATA_URL="s3://${MODEL_BUCKET}/${MODEL_KEY}"
           python3 -m venv .aws-ml-venv
           . .aws-ml-venv/bin/activate
           python -m pip install --upgrade pip
           python -m pip install 'boto3>=1.34,<2' 'sagemaker>=2.231,<3' 'huggingface_hub>=0.24,<2'
-          python backend/ml/package_aws_model.py \
+          python "$PACKAGE_SCRIPT" \
             --region "$AWS_REGION" \
             --bucket "$MODEL_BUCKET" \
             --key "$MODEL_KEY"
-          python backend/ml/deploy_aws_sentiment.py \
+          python "$DEPLOY_SCRIPT" \
             --region "$AWS_REGION" \
             --deployment-name '${{ parameters.deploymentName }}' \
             --environment '${{ parameters.environment }}' \

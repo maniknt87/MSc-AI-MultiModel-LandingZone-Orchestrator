@@ -1,0 +1,11 @@
+name: ner-inference-env
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.10
+  - pip:
+      - azureml-inference-server-http
+      - transformers
+      - torch

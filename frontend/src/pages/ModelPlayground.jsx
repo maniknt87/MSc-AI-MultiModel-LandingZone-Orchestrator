@@ -32,7 +32,10 @@ import {
 } from "../services/api";
 
 
-const sampleText = "The governed Azure deployment experience was excellent.";
+const samples = {
+  "sentiment-analysis": "The governed Azure deployment experience was excellent.",
+  "named-entity-recognition": "Manjunath works for Microsoft in Bengaluru and will visit London next week.",
+};
 
 
 function errorMessage(error) {
@@ -43,7 +46,7 @@ function errorMessage(error) {
 function ModelPlayground() {
   const [deployments, setDeployments] = useState([]);
   const [selectedId, setSelectedId] = useState("");
-  const [text, setText] = useState(sampleText);
+  const [text, setText] = useState(samples["sentiment-analysis"]);
   const [result, setResult] = useState(null);
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -121,6 +124,8 @@ function ModelPlayground() {
   }
 
   const confidence = result?.prediction?.confidence || 0;
+  const isNer = selected?.workload === "named-entity-recognition";
+  const entities = result?.prediction?.entities || [];
 
   if (loading) {
     return <Box sx={{ minHeight: 420, display: "grid", placeItems: "center" }}><CircularProgress /></Box>;
@@ -148,7 +153,12 @@ function ModelPlayground() {
 
           <FormControl fullWidth sx={{ mb: 2.5 }}>
             <InputLabel>Deployment</InputLabel>
-            <Select label="Deployment" value={selectedId} onChange={(event) => { setSelectedId(event.target.value); setResult(null); }}>
+            <Select label="Deployment" value={selectedId} onChange={(event) => {
+              const nextId = event.target.value;
+              const next = deployments.find((item) => item.id === nextId);
+              setSelectedId(nextId); setResult(null);
+              if (next?.workload && samples[next.workload]) setText(samples[next.workload]);
+            }}>
               {deployments.map((deployment) => (
                 <MenuItem key={deployment.id} value={deployment.id}>
                   {deployment.model_name} · {deployment.deployment_name}
@@ -180,11 +190,11 @@ function ModelPlayground() {
 
           <Box sx={{ display: "flex", gap: 1.25, mt: 2.5 }}>
             <Button variant="contained" startIcon={invoking ? <CircularProgress size={17} color="inherit" /> : <PlayArrowRoundedIcon />} disabled={invoking || !selected?.configured || !text.trim()} onClick={invokeModel}>
-              {invoking ? "Invoking…" : "Analyse sentiment"}
+              {invoking ? "Invoking…" : isNer ? "Extract entities" : "Analyse sentiment"}
             </Button>
-            <Button variant="outlined" onClick={() => setText(sampleText)}>Use sample</Button>
+            <Button variant="outlined" onClick={() => setText(samples[selected?.workload] || samples["sentiment-analysis"])}>Use sample</Button>
           </Box>
-          {!selected?.configured && <Alert severity="warning" sx={{ mt: 2 }}>Configure the scoring URI and endpoint key in the backend environment to enable invocation.</Alert>}
+          {!selected?.configured && <Alert severity="warning" sx={{ mt: 2 }}>{selected?.cloud === "AWS" ? "Configure backend AWS credentials with SageMaker invoke permission." : "Configure Azure ML endpoint access in the backend environment."}</Alert>}
         </Paper>
 
         <Paper elevation={0} sx={{ p: { xs: 2, md: 3 }, border: "1px solid", borderColor: "divider", minHeight: 430 }}>
@@ -196,6 +206,29 @@ function ModelPlayground() {
           {!result ? (
             <Box sx={{ minHeight: 300, borderRadius: 3, border: "1px dashed", borderColor: "divider", display: "grid", placeItems: "center", textAlign: "center", p: 4, color: "text.secondary" }}>
               <Box><AutoAwesomeRoundedIcon sx={{ fontSize: 42, color: "#9db7e8", mb: 1 }} /><Typography fontWeight={600}>Your prediction will appear here</Typography><Typography variant="body2" sx={{ mt: .5 }}>Invoke the selected model to see confidence and latency.</Typography></Box>
+            </Box>
+          ) : isNer ? (
+            <Box>
+              <Box sx={{ p: 2.5, borderRadius: 3, bgcolor: "#f8faff", border: "1px solid #dbe7ff" }}>
+                <Typography variant="overline" color="text.secondary">Named entities</Typography>
+                <Typography variant="h5" sx={{ mt: .5 }}>{entities.length} detected</Typography>
+                <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, mt: 2 }}>
+                  {entities.map((entity, index) => <Chip key={`${entity.start}-${entity.end}-${index}`} color="primary" variant="outlined" label={`${entity.text} · ${entity.label}`} />)}
+                  {entities.length === 0 && <Typography color="text.secondary">No named entities were detected.</Typography>}
+                </Box>
+              </Box>
+              {entities.length > 0 && <TableContainer sx={{ mt: 2 }}><Table size="small">
+                <TableHead><TableRow><TableCell>Entity</TableCell><TableCell>Type</TableCell><TableCell align="right">Confidence</TableCell></TableRow></TableHead>
+                <TableBody>{entities.map((entity, index) => <TableRow key={`${entity.start}-${entity.end}-${index}`}>
+                  <TableCell><strong>{entity.text}</strong></TableCell><TableCell><Chip size="small" label={entity.label} /></TableCell><TableCell align="right">{(entity.confidence * 100).toFixed(2)}%</TableCell>
+                </TableRow>)}</TableBody>
+              </Table></TableContainer>}
+              <Divider sx={{ my: 3 }} />
+              <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 2 }}>
+                <Box><Typography variant="caption" color="text.secondary">Latency</Typography><Typography fontWeight={700}>{result.metrics.latency_ms} ms</Typography></Box>
+                <Box><Typography variant="caption" color="text.secondary">Model version</Typography><Typography fontWeight={700}>{result.deployment_name} · v{result.model_version}</Typography></Box>
+              </Box>
+              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 3, wordBreak: "break-all" }}>Request ID: {result.request_id}</Typography>
             </Box>
           ) : (
             <Box>

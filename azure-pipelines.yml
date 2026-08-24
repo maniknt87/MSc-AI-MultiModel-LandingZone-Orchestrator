@@ -573,11 +573,11 @@ stages:
   displayName: 'Azure AI Model Deployment'
 
   dependsOn: Azure_Terraform_Apply
-  condition: and(succeeded(), eq('${{ parameters.action }}', 'apply'))
+  condition: and(succeeded(), eq('${{ parameters.action }}', 'apply'), or(eq('${{ parameters.workload }}', 'sentiment-analysis'), eq('${{ parameters.workload }}', 'named-entity-recognition')))
 
   jobs:
-  - job: Deploy_Sentiment_Model
-    displayName: 'Deploy Sentiment Analysis Model'
+  - job: Deploy_AI_Model
+    displayName: 'Deploy validated AI model'
 
     steps:
 
@@ -585,7 +585,7 @@ stages:
       displayName: 'Checkout repository'
 
     - task: AzureCLI@2
-      displayName: 'Deploy Sentiment Model to Azure ML'
+      displayName: 'Deploy validated model to Azure ML'
 
       inputs:
         azureSubscription: 'Azure-Terraform-Free-Connection'
@@ -669,12 +669,31 @@ stages:
           echo "Preparing persistent Azure model artifact"
           echo "======================================"
 
+          case '${{ parameters.workload }}' in
+            'sentiment-analysis')
+              MODEL_KIND="sentiment"
+              MODEL_VERSION="1"
+              MODEL_METADATA_ID="distilbert-sst2"
+              DEPLOYMENT_SCRIPT="backend/ml/deploy_sentiment.py"
+              ;;
+            'named-entity-recognition')
+              MODEL_KIND="ner"
+              MODEL_VERSION="1"
+              MODEL_METADATA_ID="dslim-bert-base-ner"
+              DEPLOYMENT_SCRIPT="backend/ml/deploy_ner.py"
+              ;;
+            *)
+              echo "ERROR: No Azure ML deployment implementation exists for ${{ parameters.workload }}."
+              exit 1
+              ;;
+          esac
+
           ARTIFACT_STORAGE_ACCOUNT="tfstateai${SUBSCRIPTION_SUFFIX}"
           ARTIFACT_CONTAINER="model-artifacts"
-          ARTIFACT_BLOB="models/sentiment/v1/model.tar.gz"
+          ARTIFACT_BLOB="models/${MODEL_KIND}/v${MODEL_VERSION}/model.tar.gz"
           ARTIFACT_DIRECTORY="$(Pipeline.Workspace)/azure-model-cache"
           ARTIFACT_ARCHIVE="$ARTIFACT_DIRECTORY/model.tar.gz"
-          MODEL_DIRECTORY="$ARTIFACT_DIRECTORY/sentiment-v1"
+          MODEL_DIRECTORY="$ARTIFACT_DIRECTORY/${MODEL_KIND}-v${MODEL_VERSION}"
           mkdir -p "$ARTIFACT_DIRECTORY" "$MODEL_DIRECTORY"
 
           ARTIFACT_EXISTS=$(az storage blob exists \
@@ -698,7 +717,7 @@ stages:
           else
             echo "Cached artifact not found; packaging it once."
             python backend/ml/package_azure_model.py \
-              --model sentiment \
+              --model "$MODEL_KIND" \
               --output "$ARTIFACT_ARCHIVE"
             az storage blob upload \
               --account-name "$ARTIFACT_STORAGE_ACCOUNT" \
@@ -707,7 +726,7 @@ stages:
               --file "$ARTIFACT_ARCHIVE" \
               --auth-mode login \
               --overwrite false \
-              --metadata model_id=distilbert-sst2 model_version=1 \
+              --metadata model_id="$MODEL_METADATA_ID" model_version="$MODEL_VERSION" \
               --output none
           fi
 
@@ -741,20 +760,14 @@ stages:
 
 
           echo "======================================"
-          echo "Deploying Sentiment Analysis Model"
+          echo "Deploying ${{ parameters.modelName }}"
           echo "======================================"
 
-          if [ '${{ parameters.workload }}' != 'sentiment-analysis' ]; then
-            echo "ERROR: This capstone currently implements model deployment only for sentiment-analysis."
-            echo "Add a deployment script for ${{ parameters.workload }} before enabling that catalogue item."
-            exit 1
-          fi
-
-          python backend/ml/deploy_sentiment.py
+          python "$DEPLOYMENT_SCRIPT"
 
 
           echo "======================================"
-          echo "Sentiment model deployment completed"
+          echo "AI model deployment completed"
           echo "======================================"
 
           echo "Storage will now be restored to private access."
@@ -823,7 +836,7 @@ stages:
           LANDING_ZONE="${{ lower(parameters.deploymentName) }}"
           ML_RESOURCE_GROUP="rg-${LANDING_ZONE}-ai-${ENVIRONMENT}"
           ML_WORKSPACE="aml-${ENVIRONMENT}"
-          ML_ENDPOINT="sentiment-ai-${SUBSCRIPTION_SUFFIX}"
+          ML_ENDPOINTS=("sentiment-ai-${SUBSCRIPTION_SUFFIX}" "ner-ai-${SUBSCRIPTION_SUFFIX}")
 
           echo "Resource Group: $RESOURCE_GROUP"
           echo "Storage Account: $STORAGE_ACCOUNT"
@@ -835,41 +848,27 @@ stages:
           echo "Deleting Azure ML nested endpoints"
           echo "======================================"
 
-          ENDPOINT_URL="https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${ML_RESOURCE_GROUP}/providers/Microsoft.MachineLearningServices/workspaces/${ML_WORKSPACE}/onlineEndpoints/${ML_ENDPOINT}?api-version=2024-10-01"
-
-          if az rest \
-            --method get \
-            --url "$ENDPOINT_URL" \
-            --only-show-errors \
-            --output none 2>/dev/null
-          then
-            echo "Deleting managed endpoint $ML_ENDPOINT and its deployments..."
-            az rest \
-              --method delete \
-              --url "$ENDPOINT_URL" \
-              --only-show-errors \
-              --output none
-
-            for attempt in $(seq 1 60); do
-              if ! az rest \
-                --method get \
-                --url "$ENDPOINT_URL" \
-                --only-show-errors \
-                --output none 2>/dev/null
-              then
-                echo "Azure ML endpoint deleted."
-                break
-              fi
-              if [ "$attempt" -eq 60 ]; then
-                echo "ERROR: Azure ML endpoint deletion did not finish within 10 minutes."
-                exit 1
-              fi
-              echo "Waiting for Azure ML endpoint deletion ($attempt/60)..."
-              sleep 10
-            done
-          else
-            echo "Azure ML endpoint is already absent."
-          fi
+          for ML_ENDPOINT in "${ML_ENDPOINTS[@]}"; do
+            ENDPOINT_URL="https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${ML_RESOURCE_GROUP}/providers/Microsoft.MachineLearningServices/workspaces/${ML_WORKSPACE}/onlineEndpoints/${ML_ENDPOINT}?api-version=2024-10-01"
+            if az rest --method get --url "$ENDPOINT_URL" --only-show-errors --output none 2>/dev/null; then
+              echo "Deleting managed endpoint $ML_ENDPOINT and its deployments..."
+              az rest --method delete --url "$ENDPOINT_URL" --only-show-errors --output none
+              for attempt in $(seq 1 60); do
+                if ! az rest --method get --url "$ENDPOINT_URL" --only-show-errors --output none 2>/dev/null; then
+                  echo "Azure ML endpoint $ML_ENDPOINT deleted."
+                  break
+                fi
+                if [ "$attempt" -eq 60 ]; then
+                  echo "ERROR: Azure ML endpoint deletion did not finish within 10 minutes."
+                  exit 1
+                fi
+                echo "Waiting for Azure ML endpoint deletion ($attempt/60)..."
+                sleep 10
+              done
+            else
+              echo "Azure ML endpoint $ML_ENDPOINT is already absent."
+            fi
+          done
 
 
           echo "======================================"

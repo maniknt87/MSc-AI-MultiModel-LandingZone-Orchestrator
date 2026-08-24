@@ -21,6 +21,17 @@ MODELS = {
             "vocab.txt",
         ],
     },
+    "ner": {
+        "model_id": "dslim/bert-base-NER",
+        "files": [
+            "config.json",
+            "model.safetensors",
+            "special_tokens_map.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "vocab.txt",
+        ],
+    },
 }
 
 

@@ -29,8 +29,8 @@ from database.database import get_connection
 _azure_runtime_cache = {}
 
 
-def _aws_session():
-    return boto3.Session(profile_name=AWS_PROFILE or None, region_name=AWS_REGION)
+def _aws_session(region=None):
+    return boto3.Session(profile_name=AWS_PROFILE or None, region_name=region or AWS_REGION)
 
 
 def _aws_is_configured():
@@ -44,6 +44,49 @@ def _aws_is_configured():
 
 def _azure_slug(value):
     return re.sub(r"[^a-z0-9-]+", "-", str(value).strip().lower()).strip("-")
+
+
+def _resource_name(prefix, deployment_name, environment):
+    value = re.sub(r"[^a-z0-9-]", "-", f"{prefix}-{deployment_name}-{environment}".lower())
+    return re.sub(r"-+", "-", value).strip("-")[:63]
+
+
+def _aws_region_code(region):
+    return {
+        "South India": "ap-south-1",
+        "US East (N. Virginia)": "us-east-1",
+        "Europe (Ireland)": "eu-west-1",
+    }.get(region, region or AWS_REGION)
+
+
+def _has_deployment_history(cloud):
+    connection = get_connection()
+    try:
+        return connection.execute(
+            "SELECT 1 FROM deployments WHERE cloud = ? LIMIT 1", (cloud,)
+        ).fetchone() is not None
+    finally:
+        connection.close()
+
+
+def _workload_definition(workload):
+    subscription_suffix = AZURE_SUBSCRIPTION_ID.replace("-", "")[:8]
+    return {
+        "sentiment-analysis": {
+            "prefix": "sentiment",
+            "azure_endpoint": AZURE_ML_ENDPOINT_NAME,
+            "azure_deployment": AZURE_ML_DEPLOYMENT_NAME,
+            "model_name": "Validated Sentiment Analysis Model",
+            "model_version": AZURE_ML_MODEL_VERSION,
+        },
+        "named-entity-recognition": {
+            "prefix": "ner",
+            "azure_endpoint": f"ner-ai-{subscription_suffix}",
+            "azure_deployment": "ner-v1",
+            "model_name": "Validated NER Model",
+            "model_version": "1",
+        },
+    }.get(str(workload).strip().lower())
 
 
 def _dynamic_azure_deployments():
@@ -72,8 +115,9 @@ def _dynamic_azure_deployments():
             payload = json.loads(row["request_payload"])
         except (TypeError, json.JSONDecodeError):
             continue
-        workload = payload.get("workload", "")
-        if str(workload).lower() not in {"sentiment-analysis", "sentiment analysis"}:
+        workload = str(payload.get("workload", "")).strip().lower()
+        definition = _workload_definition(workload)
+        if not definition:
             continue
         deployment_name = payload.get("deploymentName") or payload.get("deployment_name")
         environment = payload.get("environment") or row["environment"]
@@ -89,11 +133,11 @@ def _dynamic_azure_deployments():
             continue
         deployments.append({
             "id": f"azure:history:{row['id']}",
-            "endpoint_name": AZURE_ML_ENDPOINT_NAME,
-            "deployment_name": AZURE_ML_DEPLOYMENT_NAME,
-            "model_name": "Validated Sentiment Analysis Model",
-            "model_version": AZURE_ML_MODEL_VERSION,
-            "workload": "sentiment-analysis",
+            "endpoint_name": definition["azure_endpoint"],
+            "deployment_name": definition["azure_deployment"],
+            "model_name": definition["model_name"],
+            "model_version": definition["model_version"],
+            "workload": workload,
             "cloud": "Azure",
             "environment": environment,
             "status": "Ready",
@@ -110,11 +154,62 @@ def _dynamic_azure_deployments():
     return deployments
 
 
+def _dynamic_aws_deployments():
+    connection = get_connection()
+    try:
+        rows = connection.execute(
+            """
+            SELECT id, action, environment, region, request_payload
+            FROM deployments
+            WHERE cloud = 'AWS'
+              AND status = 'Completed'
+              AND request_payload IS NOT NULL
+            ORDER BY id DESC
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+    seen = set()
+    for row in rows:
+        try:
+            payload = json.loads(row["request_payload"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        workload = str(payload.get("workload", "")).strip().lower()
+        definition = _workload_definition(workload)
+        deployment_name = payload.get("deploymentName") or payload.get("deployment_name")
+        environment = payload.get("environment") or row["environment"]
+        if not definition or not deployment_name or not environment:
+            continue
+        identity = (_azure_slug(deployment_name), _azure_slug(environment))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if str(row["action"] or "apply").lower() != "apply":
+            continue
+        return [{
+            "id": f"aws:history:{row['id']}",
+            "endpoint_name": _resource_name(definition["prefix"], deployment_name, environment),
+            "deployment_name": "AllTraffic",
+            "model_name": f"AWS SageMaker {definition['model_name']}",
+            "model_version": definition["model_version"],
+            "workload": workload,
+            "cloud": "AWS",
+            "environment": environment,
+            "region": _aws_region_code(row["region"]),
+            "status": "Ready" if _aws_is_configured() else "AWS credentials required",
+            "configured": _aws_is_configured(),
+            "private": False,
+        }]
+    return []
+
+
 def list_playground_deployments():
     dynamic_azure = _dynamic_azure_deployments()
+    dynamic_aws = _dynamic_aws_deployments()
     azure_configured = bool(AZURE_ML_SCORING_URI and AZURE_ML_ENDPOINT_KEY)
     aws_configured = _aws_is_configured()
-    static_azure = [] if dynamic_azure else [{
+    static_azure = [] if dynamic_azure or _has_deployment_history("Azure") else [{
             "id": f"azure:{AZURE_ML_ENDPOINT_NAME}",
             "endpoint_name": AZURE_ML_ENDPOINT_NAME,
             "deployment_name": AZURE_ML_DEPLOYMENT_NAME,
@@ -127,7 +222,7 @@ def list_playground_deployments():
             "configured": azure_configured,
             "private": True,
         }]
-    return dynamic_azure + static_azure + [{
+    static_aws = [] if dynamic_aws or _has_deployment_history("AWS") else [{
             "id": f"aws:{AWS_SAGEMAKER_ENDPOINT_NAME}",
             "endpoint_name": AWS_SAGEMAKER_ENDPOINT_NAME,
             "deployment_name": "AllTraffic",
@@ -140,6 +235,7 @@ def list_playground_deployments():
             "configured": aws_configured,
             "private": False,
         }]
+    return dynamic_azure + static_azure + dynamic_aws + static_aws
 
 
 def _get_azure_runtime(deployment):
@@ -242,6 +338,34 @@ def _normalized_response(base_record, model_version, prediction, confidence, lat
     }
 
 
+def _normalized_ner_response(base_record, model_version, entities, latency_ms):
+    normalized = [{
+        "text": str(item.get("text") or item.get("word") or ""),
+        "label": str(item.get("label") or item.get("entity_group") or "ENTITY"),
+        "confidence": float(item.get("confidence", item.get("score", 0))),
+        "start": int(item.get("start", 0)),
+        "end": int(item.get("end", 0)),
+    } for item in entities]
+    confidence = max((item["confidence"] for item in normalized), default=0.0)
+    _record_run({
+        **base_record,
+        "prediction": f"{len(normalized)} entities",
+        "confidence": confidence,
+        "latency_ms": latency_ms,
+        "status": "Succeeded",
+    })
+    return {
+        "request_id": base_record["request_id"],
+        "cloud": base_record["cloud"],
+        "workload": base_record["workload"],
+        "endpoint_name": base_record["endpoint_name"],
+        "deployment_name": base_record["deployment_name"],
+        "model_version": model_version,
+        "prediction": {"entities": normalized, "entity_count": len(normalized)},
+        "metrics": {"latency_ms": latency_ms},
+    }
+
+
 def _base_record(deployment, text, username):
     return {
         "request_id": str(uuid.uuid4()),
@@ -278,30 +402,46 @@ def _invoke_azure(deployment, text, username):
         result = response.json()
         if isinstance(result, str):
             result = json.loads(result)
+        latency_ms = round((time.perf_counter() - started) * 1000)
+        if deployment["workload"] == "named-entity-recognition":
+            entities = result.get("entities") if isinstance(result, dict) else None
+            if not isinstance(entities, list):
+                raise ValueError("The Azure NER response is missing its entities list.")
+            return _normalized_ner_response(
+                base_record, deployment["model_version"], entities, latency_ms
+            )
         prediction, confidence = result.get("label"), result.get("score")
         if prediction is None or confidence is None:
             raise ValueError("The Azure model response is missing label or score.")
-        latency_ms = round((time.perf_counter() - started) * 1000)
         return _normalized_response(base_record, deployment["model_version"], prediction, confidence, latency_ms)
     except Exception as error:
         _record_failure(base_record, started, error)
         raise RuntimeError("Azure ML inference failed. Check endpoint health and backend credentials.") from error
 
 
-def _extract_aws_prediction(result):
+def _decode_aws_result(result):
     candidate = result
-    # Accept both the canonical Hugging Face response and the legacy v2
-    # package response, which wrapped a JSON string and content type in a list.
     for _ in range(4):
-        if isinstance(candidate, list) and candidate:
-            candidate = candidate[0]
-            continue
         if isinstance(candidate, str):
             candidate = json.loads(candidate)
             continue
+        if (
+            isinstance(candidate, list) and len(candidate) == 2
+            and isinstance(candidate[0], str)
+            and candidate[1] == "application/json"
+        ):
+            candidate = candidate[0]
+            continue
         break
+    return candidate
+
+
+def _extract_aws_prediction(result):
+    candidate = _decode_aws_result(result)
+    if isinstance(candidate, list) and candidate:
+        candidate = candidate[0]
     if not isinstance(candidate, dict):
-        raise ValueError("The SageMaker model returned an unsupported response format.")
+        raise ValueError("The SageMaker sentiment model returned an unsupported response format.")
     prediction, confidence = candidate.get("label"), candidate.get("score")
     if prediction is None or confidence is None:
         raise ValueError("The SageMaker response is missing label or score.")
@@ -312,7 +452,7 @@ def _invoke_aws(deployment, text, username):
     started = time.perf_counter()
     base_record = _base_record(deployment, text, username)
     try:
-        client = _aws_session().client(
+        client = _aws_session(deployment.get("region")).client(
             "sagemaker-runtime",
             config=Config(connect_timeout=10, read_timeout=AWS_SAGEMAKER_REQUEST_TIMEOUT, retries={"max_attempts": 2}),
         )
@@ -322,17 +462,28 @@ def _invoke_aws(deployment, text, username):
             Body=json.dumps({"inputs": text}).encode("utf-8"),
         )
         result = json.loads(response["Body"].read().decode("utf-8"))
-        prediction, confidence = _extract_aws_prediction(result)
         latency_ms = round((time.perf_counter() - started) * 1000)
+        if deployment["workload"] == "named-entity-recognition":
+            entities = _decode_aws_result(result)
+            if not isinstance(entities, list):
+                raise ValueError("The SageMaker NER response is missing its entities list.")
+            return _normalized_ner_response(
+                base_record, deployment["model_version"], entities, latency_ms
+            )
+        prediction, confidence = _extract_aws_prediction(result)
         return _normalized_response(base_record, deployment["model_version"], prediction, confidence, latency_ms)
     except (BotoCoreError, ClientError, ValueError, json.JSONDecodeError) as error:
         _record_failure(base_record, started, error)
         raise RuntimeError("AWS SageMaker inference failed. Check endpoint health, region, and backend IAM credentials.") from error
 
 
-def invoke_sentiment_endpoint(deployment, text, username):
+def invoke_model_endpoint(deployment, text, username):
     if deployment["cloud"] == "Azure":
         return _invoke_azure(deployment, text, username)
     if deployment["cloud"] == "AWS":
         return _invoke_aws(deployment, text, username)
     raise RuntimeError(f"Unsupported inference cloud: {deployment['cloud']}")
+
+
+# Backward-compatible alias for existing callers.
+invoke_sentiment_endpoint = invoke_model_endpoint

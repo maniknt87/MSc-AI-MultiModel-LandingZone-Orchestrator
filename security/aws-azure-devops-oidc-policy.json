@@ -119,7 +119,10 @@
       "Resource": [
         "arn:aws:sagemaker:*:699754982224:endpoint/sentiment-*",
         "arn:aws:sagemaker:*:699754982224:endpoint-config/sentiment-config-*",
-        "arn:aws:sagemaker:*:699754982224:model/sentiment-model-*"
+        "arn:aws:sagemaker:*:699754982224:model/sentiment-model-*",
+        "arn:aws:sagemaker:*:699754982224:endpoint/ner-*",
+        "arn:aws:sagemaker:*:699754982224:endpoint-config/ner-config-*",
+        "arn:aws:sagemaker:*:699754982224:model/ner-model-*"
       ]
     },
     {

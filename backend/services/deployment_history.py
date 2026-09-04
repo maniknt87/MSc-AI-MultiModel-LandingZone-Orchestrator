@@ -97,7 +97,10 @@ def _sync_active_deployments(connection):
     rows = connection.execute(
         """
         SELECT * FROM deployments
-        WHERE status IN ('Queued', 'Running', 'Cancelling')
+        -- A failed Azure DevOps job can be rerun within the same pipeline run.
+        -- Recheck failed application records so a successful DevOps rerun can
+        -- promote the local lifecycle record to Completed.
+        WHERE status IN ('Queued', 'Running', 'Cancelling', 'Failed')
         ORDER BY id DESC
         """
     ).fetchall()
